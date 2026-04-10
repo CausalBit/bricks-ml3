@@ -1,0 +1,15 @@
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line length handled by formatter
+]
+
+[lint.per-file-ignores]
+"src/notebooks/*.py" = ["E402", "F821"]  # notebooks: imports after COMMAND separators, globals like `spark`/`dbutils`
+"tests/**" = ["F811"]                     # pytest fixtures appear as redefined names
+
+[format]
+quote-style = "double"

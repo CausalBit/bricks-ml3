@@ -1,0 +1,70 @@
+name: Bootstrap Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target environment to bootstrap"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+# Full environment bootstrap: deploys the bundle, seeds bronze/silver data,
+# then either trains models (dev/staging) or copies from staging (prod).
+#
+# For prod: staging must be bootstrapped first — prod copies models from staging.
+
+concurrency:
+  group: target-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate dispatch branch
+    runs-on: self-hosted
+    steps:
+      - name: Check branch vs target
+        run: |
+          REF="${{ github.ref_name }}"
+          TARGET="${{ inputs.target }}"
+          case "$TARGET" in
+            dev)     ALLOWED="dev" ;;
+            staging) ALLOWED="main" ;;
+            prod)    ALLOWED="main" ;;
+          esac
+          if [ "$REF" != "$ALLOWED" ]; then
+            echo "::error::Bootstrapping $TARGET requires dispatching from '$ALLOWED', but you're on '$REF'. Switch branches in the dispatch UI."
+            exit 1
+          fi
+          echo "Branch '$REF' is valid for target '$TARGET'."
+
+  bootstrap:
+    needs: validate
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: ${{ inputs.target }}
+      run_job: bootstrap
+    secrets: inherit
+
+  # Dev and staging: train models locally after bootstrap
+  initial_training:
+    if: inputs.target != 'prod'
+    needs: bootstrap
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: ${{ inputs.target }}
+      run_job: initial_training
+    secrets: inherit
+
+  # Prod: copy models from staging after bootstrap (no local training)
+  promote_model:
+    if: inputs.target == 'prod'
+    needs: bootstrap
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: prod
+      run_job: promote_model
+    secrets: inherit

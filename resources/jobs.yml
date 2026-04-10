@@ -1,0 +1,563 @@
+resources:
+  jobs:
+    # ------------------------------------------------------------------
+    # Job 1: bootstrap — one-time data seeding (no schedule)
+    #
+    # Downloads ML-25M and runs bronze → silver ETL. Idempotent: the
+    # download notebook exits early if bronze tables already exist.
+    # Run once per environment, then never again (unless schemas are wiped).
+    # ------------------------------------------------------------------
+    bootstrap:
+      name: "bricks-ml3-bootstrap-${var.catalog}"
+      description: "One-time: download ML-25M, write bronze tables, run silver ETL"
+      tags:
+        lifecycle: setup
+        owner: platform
+      job_clusters:
+        - job_cluster_key: etl_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.etl_node_type_id}
+            num_workers: ${var.etl_num_workers}
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.driver.memory: "16g"
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: download_and_ingest
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/00_download_data.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: silver_etl
+          depends_on:
+            - task_key: download_and_ingest
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/02_silver_etl.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+    # ------------------------------------------------------------------
+    # Job 2: initial_training — seed models and scores (no schedule)
+    #
+    # Two cluster profiles:
+    #   etl_cluster      — distributed Spark for feature engineering
+    #   training_cluster — memory-optimized single node for toPandas() +
+    #                      sklearn model.fit(), validation, and scoring
+    # ------------------------------------------------------------------
+    initial_training:
+      name: "bricks-ml3-initial-training-${var.catalog}"
+      description: "Seed: build features, train + validate both models, promote, initial batch scoring"
+      tags:
+        lifecycle: setup
+        owner: ml-engineer
+      job_clusters:
+        - job_cluster_key: etl_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.etl_node_type_id}
+            num_workers: ${var.etl_num_workers}
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.driver.memory: "16g"
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+        - job_cluster_key: training_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.training_node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.driver.memory: ${var.driver_memory}
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: feature_engineering
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/03_feature_engineering.py
+            base_parameters:
+              catalog: ${var.catalog}
+              sample_fraction: ${var.sample_fraction}
+
+        - task_key: train_general
+          depends_on:
+            - task_key: feature_engineering
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/04_train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+              sample_fraction: ${var.sample_fraction}
+              hyperparams_profile: ${var.hyperparams_profile}
+
+        - task_key: train_nokids
+          depends_on:
+            - task_key: feature_engineering
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/04_train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+              sample_fraction: ${var.sample_fraction}
+              hyperparams_profile: ${var.hyperparams_profile}
+
+        - task_key: validate_general
+          depends_on:
+            - task_key: train_general
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/05_validate.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: validate_nokids
+          depends_on:
+            - task_key: train_nokids
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/05_validate.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+
+        - task_key: promote_or_reject
+          depends_on:
+            - task_key: validate_general
+            - task_key: validate_nokids
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/09_promote_or_reject.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: batch_score_general
+          depends_on:
+            - task_key: promote_or_reject
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: batch_score_nokids
+          depends_on:
+            - task_key: promote_or_reject
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+
+    # ------------------------------------------------------------------
+    # Job 3: daily_scoring — 06:00 UTC every day
+    #
+    # simulate_new_data advances the holdout time window AND rebuilds
+    # the gold feature tables — no separate feature_engineering step
+    # needed. Uses etl_cluster since simulate_new_data does Spark joins.
+    # ------------------------------------------------------------------
+    daily_scoring:
+      name: "bricks-ml3-daily-scoring-${var.catalog}"
+      description: "Daily: advance holdout window + features, batch score both models, monitor drift"
+      tags:
+        lifecycle: operational
+        owner: data-scientist
+      job_clusters:
+        - job_cluster_key: etl_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.etl_node_type_id}
+            num_workers: ${var.etl_num_workers}
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.driver.memory: "16g"
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: "UTC"
+        pause_status: ${var.schedule_pause_status}
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: simulate_new_data
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/08_simulate_new_data.py
+            base_parameters:
+              catalog: ${var.catalog}
+              days_window: "1"
+              sample_fraction: ${var.sample_fraction}
+
+        - task_key: batch_score_general
+          depends_on:
+            - task_key: simulate_new_data
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: batch_score_nokids
+          depends_on:
+            - task_key: simulate_new_data
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+
+        - task_key: monitor
+          depends_on:
+            - task_key: batch_score_general
+            - task_key: batch_score_nokids
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/10_monitor.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+    # ------------------------------------------------------------------
+    # Job 4: weekly_retraining — 04:00 UTC every Sunday
+    #
+    # Two cluster profiles (same as initial_training):
+    #   etl_cluster      — for feature_engineering (distributed Spark)
+    #   training_cluster — for train/validate/promote/score (single-node)
+    # ------------------------------------------------------------------
+    weekly_retraining:
+      name: "bricks-ml3-weekly-retraining-${var.catalog}"
+      description: "Weekly: refresh features, retrain both models, validate, promote, batch score"
+      tags:
+        lifecycle: operational
+        owner: data-scientist
+      job_clusters:
+        - job_cluster_key: etl_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.etl_node_type_id}
+            num_workers: ${var.etl_num_workers}
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.driver.memory: "16g"
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+        - job_cluster_key: training_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.training_node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.driver.memory: ${var.driver_memory}
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      schedule:
+        quartz_cron_expression: "0 0 4 ? * SUN"
+        timezone_id: "UTC"
+        pause_status: ${var.retraining_pause_status}
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: feature_engineering
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/03_feature_engineering.py
+            base_parameters:
+              catalog: ${var.catalog}
+              sample_fraction: ${var.sample_fraction}
+
+        - task_key: train_general
+          depends_on:
+            - task_key: feature_engineering
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/04_train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+              sample_fraction: ${var.sample_fraction}
+              hyperparams_profile: ${var.hyperparams_profile}
+
+        - task_key: train_nokids
+          depends_on:
+            - task_key: feature_engineering
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/04_train.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+              sample_fraction: ${var.sample_fraction}
+              hyperparams_profile: ${var.hyperparams_profile}
+
+        - task_key: validate_general
+          depends_on:
+            - task_key: train_general
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/05_validate.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: validate_nokids
+          depends_on:
+            - task_key: train_nokids
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/05_validate.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+
+        - task_key: promote_or_reject
+          depends_on:
+            - task_key: validate_general
+            - task_key: validate_nokids
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/09_promote_or_reject.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+        - task_key: batch_score_general
+          depends_on:
+            - task_key: promote_or_reject
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: batch_score_nokids
+          depends_on:
+            - task_key: promote_or_reject
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids
+
+    # ------------------------------------------------------------------
+    # Job 5: feature_backfill — on-demand
+    #
+    # Standalone feature refresh. Distributed Spark, uses etl_cluster.
+    # ------------------------------------------------------------------
+    feature_backfill:
+      name: "bricks-ml3-feature-backfill-${var.catalog}"
+      description: "On-demand: rebuild gold feature tables from current silver data"
+      tags:
+        lifecycle: operational
+        owner: data-scientist
+      job_clusters:
+        - job_cluster_key: etl_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.etl_node_type_id}
+            num_workers: ${var.etl_num_workers}
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.driver.memory: "16g"
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: feature_engineering
+          job_cluster_key: etl_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/03_feature_engineering.py
+            base_parameters:
+              catalog: ${var.catalog}
+              sample_fraction: ${var.sample_fraction}
+
+    # ------------------------------------------------------------------
+    # Job 6: endpoint_deploy — on-demand (optional/advanced, dev/staging)
+    #
+    # Lightweight API calls only — single node, no workers needed.
+    # ------------------------------------------------------------------
+    endpoint_deploy:
+      name: "bricks-ml3-endpoint-deploy-${var.catalog}"
+      description: "Optional/advanced: promote @Challenger to @Champion and create serving endpoints"
+      tags:
+        lifecycle: operational
+        owner: ml-engineer
+        scope: optional
+      job_clusters:
+        - job_cluster_key: training_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.training_node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.driver.memory: "16g"
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: deploy_endpoints
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/06_deploy_endpoints.py
+            base_parameters:
+              catalog: ${var.catalog}
+
+    # ------------------------------------------------------------------
+    # Job 7: promote_model — copy staging models to prod + batch score
+    #
+    # Lightweight: MLflow API call + single-node batch scoring.
+    # No workers needed.
+    # ------------------------------------------------------------------
+    promote_model:
+      name: "bricks-ml3-promote-model-${var.catalog}"
+      description: "Promote: copy @Champion from staging to prod, then batch score"
+      tags:
+        lifecycle: operational
+        owner: ml-engineer
+      job_clusters:
+        - job_cluster_key: training_cluster
+          new_cluster:
+            spark_version: "15.4.x-cpu-ml-scala2.12"
+            node_type_id: ${var.training_node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.driver.memory: "16g"
+              spark.master: "local[*]"
+            custom_tags:
+              ResourceClass: SingleNode
+            cluster_log_conf:
+              dbfs:
+                destination: "dbfs:/cluster-logs"
+      email_notifications:
+        on_failure:
+          - "your-email@example.com"
+      tasks:
+        - task_key: copy_models
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/11_copy_model_to_prod.py
+            base_parameters:
+              src_catalog: ${var.src_catalog}
+              dst_catalog: ${var.catalog}
+
+        - task_key: batch_score_general
+          depends_on:
+            - task_key: copy_models
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: general
+
+        - task_key: batch_score_nokids
+          depends_on:
+            - task_key: copy_models
+          job_cluster_key: training_cluster
+          libraries:
+            - whl: ../dist/*.whl
+          notebook_task:
+            notebook_path: ../src/notebooks/07_batch_score.py
+            base_parameters:
+              catalog: ${var.catalog}
+              model_variant: nokids

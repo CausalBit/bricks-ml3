@@ -1,0 +1,81 @@
+name: Run Job
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      job:
+        description: "Job to run"
+        required: true
+        type: choice
+        options:
+          - bootstrap
+          - initial_training
+          - daily_scoring
+          - weekly_retraining
+          - feature_backfill
+          - endpoint_deploy
+          - promote_model
+
+# Runs a single job on the selected target WITHOUT redeploying the bundle.
+# The bundle must already be deployed to the target.
+
+concurrency:
+  group: target-${{ inputs.target }}
+  cancel-in-progress: false
+
+env:
+  DATABRICKS_HOST: https://YOUR_WORKSPACE.azuredatabricks.net/
+  DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+
+jobs:
+  validate:
+    name: Validate dispatch branch
+    runs-on: self-hosted
+    steps:
+      - name: Check branch vs target
+        run: |
+          REF="${{ github.ref_name }}"
+          TARGET="${{ inputs.target }}"
+          case "$TARGET" in
+            dev)     ALLOWED="dev" ;;
+            staging) ALLOWED="main" ;;
+            prod)    ALLOWED="main" ;;
+          esac
+          if [ "$REF" != "$ALLOWED" ]; then
+            echo "::error::Running jobs on $TARGET requires dispatching from '$ALLOWED', but you're on '$REF'. Switch branches in the dispatch UI."
+            exit 1
+          fi
+          echo "Branch '$REF' is valid for target '$TARGET'."
+
+  run:
+    needs: validate
+    name: "Run ${{ inputs.job }} on ${{ inputs.target }}"
+    runs-on: self-hosted
+    environment: ${{ inputs.target }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: "Run ${{ inputs.job }}"
+        run: databricks bundle run -t ${{ inputs.target }} ${{ inputs.job }}
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "### Job Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ${{ inputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job:** ${{ inputs.job }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

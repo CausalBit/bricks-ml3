@@ -1,0 +1,31 @@
+movieId,title,genres
+1,Toy Story (1995),Adventure|Animation|Children|Comedy|Fantasy
+2,Jumanji (1995),Adventure|Children|Fantasy
+3,Heat (1995),Action|Crime|Thriller
+4,Seven (a.k.a. Se7en) (1995),Mystery|Thriller
+5,Usual Suspects The (1995),Crime|Mystery|Thriller
+6,Braveheart (1995),Action|Drama|War
+7,Apollo 13 (1995),Adventure|Drama|IMAX
+8,Pulp Fiction (1994),Comedy|Crime|Drama|Thriller
+9,Forrest Gump (1994),Comedy|Drama|Romance|War
+10,Schindler's List (1993),Drama|War
+11,Star Wars: Episode IV (1977),Action|Adventure|Drama|Sci-Fi
+12,Silence of the Lambs The (1991),Crime|Horror|Thriller
+13,Terminator 2: Judgment Day (1991),Action|Sci-Fi
+14,Fargo (1996),Comedy|Crime|Drama|Thriller
+15,Godfather The (1972),Crime|Drama
+16,Sound of Music The (1965),Musical|Romance
+17,Casablanca (1942),Drama|Romance
+18,Chinatown (1974),Crime|Film-Noir|Mystery|Thriller
+19,Shawshank Redemption The (1994),Crime|Drama
+20,Raiders of the Lost Ark (1981),Action|Adventure
+21,Good Will Hunting (1997),Drama|Romance
+22,Saving Private Ryan (1998),Action|Drama|War
+23,Alien (1979),Horror|Sci-Fi|Thriller
+24,Princess Bride The (1987),Action|Adventure|Comedy|Fantasy|Romance
+25,Unforgiven (1992),Drama|Western
+26,Blazing Saddles (1974),Comedy|Western
+27,March of the Penguins (2005),Documentary
+28,Fantasia (1940),Animation|Children|Drama|Fantasy|Musical
+29,Spirited Away (2001),Adventure|Animation|Fantasy
+30,Unknown Movie (2020),(no genres listed)

@@ -1,0 +1,158 @@
+name: Rollback
+
+# Two modes:
+#   model — revert @Champion aliases to previous version (seconds, no retrain)
+#   full  — re-deploy a previous release tag (for prod: code only; for dev/staging: + retrain)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: prod
+        options:
+          - prod
+          - staging
+          - dev
+      mode:
+        description: "Rollback mode"
+        required: true
+        type: choice
+        options:
+          - model
+          - full
+      version:
+        description: "Model version to roll back to (model mode, empty = previous)"
+        required: false
+        type: string
+        default: ""
+      tag:
+        description: "Release tag to roll back to (full mode, e.g. v1.2.3, empty = previous)"
+        required: false
+        type: string
+        default: ""
+      confirm:
+        description: "Type 'rollback' to confirm"
+        required: true
+        type: string
+
+concurrency:
+  group: target-${{ inputs.target }}
+  cancel-in-progress: false
+
+env:
+  DATABRICKS_HOST: https://YOUR_WORKSPACE.azuredatabricks.net/
+  DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+  PYTHON: /opt/homebrew/Caskroom/miniforge/base/bin/python3
+
+jobs:
+  # ---- Model rollback: revert @Champion alias (fast) ----
+  model-rollback:
+    name: "Model rollback (${{ inputs.target }})"
+    if: inputs.mode == 'model'
+    runs-on: self-hosted
+    environment: ${{ inputs.target }}
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "rollback" ]; then
+            echo "::error::You must type 'rollback' to confirm. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Set up Python
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Roll back @Champion aliases
+        run: |
+          VERSION_FLAG=""
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION_FLAG="--version ${{ inputs.version }}"
+          fi
+          python scripts/rollback_model.py --target ${{ inputs.target }} $VERSION_FLAG
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Model Rollback" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ${{ inputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ inputs.version || 'previous' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ---- Full rollback: re-deploy previous release tag ----
+  full-rollback-guard:
+    name: Validate full rollback
+    if: inputs.mode == 'full'
+    runs-on: self-hosted
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      run_job: ${{ steps.resolve.outputs.run_job }}
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "rollback" ]; then
+            echo "::error::You must type 'rollback' to confirm. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve rollback tag
+        id: resolve
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            CURRENT=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+            if [ -z "$CURRENT" ]; then
+              echo "::error::No release tags found."
+              exit 1
+            fi
+            TAG=$(git describe --tags --abbrev=0 --match 'v*' "${CURRENT}^" 2>/dev/null || echo "")
+            if [ -z "$TAG" ]; then
+              echo "::error::Only one release tag ($CURRENT). Nothing to roll back to."
+              exit 1
+            fi
+          fi
+          SHA=$(git rev-list -n 1 "$TAG" 2>/dev/null || echo "")
+          if [ -z "$SHA" ]; then
+            echo "::error::Tag '$TAG' not found."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+          # Prod: code-only rollback (no training). Use model rollback separately.
+          # Dev/staging: retrain with the old code.
+          TARGET="${{ inputs.target }}"
+          if [ "$TARGET" = "prod" ]; then
+            echo "run_job=none" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_job=weekly_retraining" >> "$GITHUB_OUTPUT"
+          fi
+
+  full-rollback-deploy:
+    name: "Re-deploy ${{ needs.full-rollback-guard.outputs.tag }}"
+    needs: full-rollback-guard
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: ${{ inputs.target }}
+      ref: ${{ needs.full-rollback-guard.outputs.sha }}
+      run_job: ${{ needs.full-rollback-guard.outputs.run_job }}
+    secrets: inherit

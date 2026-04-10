@@ -1,0 +1,62 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - name: DATABRICKS_HOST
+    value: https://YOUR_WORKSPACE.azuredatabricks.net/
+  - name: DATABRICKS_CLIENT_ID
+    value: $(DATABRICKS_CLIENT_ID_VAR)
+  - name: DATABRICKS_CLIENT_SECRET
+    value: $(DATABRICKS_CLIENT_SECRET_VAR)
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.10"
+    displayName: "Set up Python 3.10"
+
+  - script: |
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
+    displayName: "Install dependencies"
+
+  - script: pytest tests/unit/ -m unit -v
+    displayName: "Run unit tests"
+
+  - script: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+    displayName: "Install Databricks CLI"
+
+  - script: databricks bundle validate -t dev
+    displayName: "Validate DABs bundle (dev)"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - script: databricks bundle validate -t staging
+    displayName: "Validate DABs bundle (staging)"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - script: databricks bundle validate -t prod
+    displayName: "Validate DABs bundle (prod)"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - script: pytest tests/integration/ -m integration -v
+    displayName: "Run integration tests"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)

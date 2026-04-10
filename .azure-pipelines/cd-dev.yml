@@ -1,0 +1,47 @@
+trigger:
+  branches:
+    include:
+      - "*"
+    exclude:
+      - main
+
+pr: none
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - name: DATABRICKS_HOST
+    value: https://YOUR_WORKSPACE.azuredatabricks.net/
+  - name: DATABRICKS_CLIENT_ID
+    value: $(DATABRICKS_CLIENT_ID_VAR)
+  - name: DATABRICKS_CLIENT_SECRET
+    value: $(DATABRICKS_CLIENT_SECRET_VAR)
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.10"
+    displayName: "Set up Python 3.10"
+
+  - script: |
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
+    displayName: "Install dependencies"
+
+  - script: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+    displayName: "Install Databricks CLI"
+
+  - script: databricks bundle deploy -t dev
+    displayName: "Deploy bundle to dev (dsml_dev)"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - script: databricks bundle run -t dev weekly_retraining
+    displayName: "Run weekly retraining (integration test)"
+    env:
+      DATABRICKS_HOST: $(DATABRICKS_HOST)
+      DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+      DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)

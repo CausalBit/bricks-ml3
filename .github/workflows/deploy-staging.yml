@@ -1,0 +1,41 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "project_specs/**"
+      - ".cursor/**"
+      - ".claude/**"
+  workflow_dispatch:
+    inputs:
+      run_job:
+        description: "Post-deploy job (empty = auto-detect)"
+        required: false
+        type: choice
+        default: ""
+        options:
+          - ""
+          - weekly_retraining
+          - daily_scoring
+          - feature_backfill
+          - endpoint_deploy
+          - none
+
+concurrency:
+  group: target-staging
+  cancel-in-progress: false
+
+# Staging trains with prod-scale data (100% users, prod hyperparams).
+# The validated model here is the one that gets copied to prod.
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: staging
+      run_job: ${{ inputs.run_job || '' }}
+      base_sha: ${{ github.event.before || '' }}
+    secrets: inherit

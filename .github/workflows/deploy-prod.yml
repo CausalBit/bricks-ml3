@@ -1,0 +1,121 @@
+name: Deploy to Prod
+
+# Manual only. Copies the validated model from staging to prod.
+# Prod is batch-inference only — no training, no serving endpoints.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_job:
+        description: "Post-deploy job"
+        required: false
+        type: choice
+        default: promote_model
+        options:
+          - promote_model
+          - daily_scoring
+          - none
+      confirm:
+        description: "Type 'deploy' to confirm production deployment"
+        required: true
+        type: string
+
+concurrency:
+  group: target-prod
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Pre-deploy checks
+    runs-on: self-hosted
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy" ]; then
+            echo "::error::You must type 'deploy' to confirm. Got: '${{ inputs.confirm }}'"
+            exit 1
+          fi
+
+      - name: Verify running from main branch
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "::error::Deploy to Prod must be dispatched from 'main' (you're on '${{ github.ref_name }}')."
+            exit 1
+          fi
+
+      - name: Verify staging deployment succeeded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RESULT=$(gh run list \
+            --workflow "Deploy to Staging" \
+            --branch main \
+            --limit 1 \
+            --json conclusion,headSha,createdAt \
+            --jq '.[0]')
+
+          CONCLUSION=$(echo "$RESULT" | jq -r '.conclusion')
+          CREATED=$(echo "$RESULT" | jq -r '.createdAt')
+
+          echo "Last staging deploy: conclusion=$CONCLUSION date=$CREATED"
+
+          if [ "$CONCLUSION" != "success" ]; then
+            echo "::error::Last staging deployment did not succeed (status: $CONCLUSION). Fix staging before promoting to prod."
+            exit 1
+          fi
+
+  deploy:
+    needs: guard
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: prod
+      run_job: ${{ inputs.run_job || 'promote_model' }}
+    secrets: inherit
+
+  release:
+    name: Tag release
+    needs: deploy
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: version
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "v0.0.0")
+
+          IFS='.' read -r RAW_MAJOR MINOR PATCH <<< "${LAST_TAG#v}"
+          MAJOR=${RAW_MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          if git log "${LAST_TAG}..HEAD" --oneline 2>/dev/null | grep -qiE '^[a-f0-9]+ feat'; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          while git rev-parse "$TAG" >/dev/null 2>&1; do
+            PATCH=$((PATCH + 1))
+            TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          done
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --target "${{ github.sha }}" \
+            --generate-notes \
+            --title "${{ steps.version.outputs.tag }}"
+          echo "### Production Release" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag:** ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY

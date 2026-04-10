@@ -1,0 +1,14 @@
+userId,movieId,tag,timestamp
+1,1,fun,964982703
+1,3,dark,964981247
+1,3,intense,964981300
+2,1,classic,964980100
+2,5,clever,964980300
+3,6,epic,965002000
+3,9,heartwarming,965003000
+5,3,gritty,967100100
+5,8,pulpy,967100300
+7,10,powerful,969300300
+9,1,favorite,971500100
+9,5,twist,971500200
+10,25,western classic,972600600

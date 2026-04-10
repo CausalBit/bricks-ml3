@@ -1,0 +1,84 @@
+name: Deploy to Dev
+
+on:
+  push:
+    branches: [dev]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "project_specs/**"
+      - ".cursor/**"
+      - ".claude/**"
+  workflow_dispatch:
+    inputs:
+      run_job:
+        description: "Post-deploy job (empty = auto-detect)"
+        required: false
+        type: choice
+        default: ""
+        options:
+          - ""
+          - weekly_retraining
+          - daily_scoring
+          - feature_backfill
+          - bootstrap
+          - initial_training
+          - endpoint_deploy
+          - none
+
+concurrency:
+  group: target-dev
+  cancel-in-progress: false
+
+# Lint and unit tests already ran in ci.yml on the PR.
+# This workflow only deploys and runs integration tests.
+
+jobs:
+  deploy:
+    name: Deploy
+    uses: ./.github/workflows/_reusable-deploy.yml
+    with:
+      target: dev
+      run_job: ${{ inputs.run_job || '' }}
+      base_sha: ${{ github.event.before || '' }}
+    secrets: inherit
+
+  # ------------------------------------------------------------------
+  # Integration tests — run after successful deploy
+  # ------------------------------------------------------------------
+  integration-tests:
+    name: Integration Tests
+    needs: deploy
+    runs-on: self-hosted
+    env:
+      DATABRICKS_HOST: https://YOUR_WORKSPACE.azuredatabricks.net/
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      PYTHON: /opt/homebrew/Caskroom/miniforge/base/bin/python3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt', 'setup.py') }}
+
+      - name: Set up Python venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Add venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Run integration tests
+        run: python3 -m pytest tests/integration/ -m integration -v

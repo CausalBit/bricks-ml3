@@ -1,0 +1,205 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "project_specs/**"
+      - ".cursor/**"
+      - ".claude/**"
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_HOST: https://YOUR_WORKSPACE.azuredatabricks.net/
+  DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+  PYTHON: /opt/homebrew/Caskroom/miniforge/base/bin/python3
+
+jobs:
+  # ------------------------------------------------------------------
+  # Detect which source domains changed to scope tests
+  # ------------------------------------------------------------------
+  detect:
+    name: Detect changes
+    runs-on: self-hosted
+    outputs:
+      tests: ${{ steps.detect.outputs.tests }}
+      skip_deploy: ${{ steps.detect.outputs.skip_deploy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed domains
+        id: detect
+        run: |
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          bash scripts/detect_changes.sh "$BASE_SHA" "$HEAD_SHA"
+
+  # ------------------------------------------------------------------
+  # Lint + format — always runs (fast)
+  # ------------------------------------------------------------------
+  lint:
+    name: Lint & Format (bypassed)
+    if: false
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt', 'setup.py') }}
+
+      - name: Set up Python venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Add venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Ruff check
+        run: ruff check src/ tests/
+
+      - name: Ruff format check
+        run: ruff format --check src/ tests/
+
+  # ------------------------------------------------------------------
+  # Validate DABs bundle config
+  # ------------------------------------------------------------------
+  validate-bundle:
+    name: Validate Bundle
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Validate bundle (dev)
+        run: databricks bundle validate -t dev
+
+      - name: Validate bundle (staging)
+        if: github.base_ref == 'main'
+        run: databricks bundle validate -t staging
+
+      - name: Validate bundle (prod)
+        if: github.base_ref == 'main'
+        run: databricks bundle validate -t prod
+
+  # ------------------------------------------------------------------
+  # Conditional unit test jobs
+  # ------------------------------------------------------------------
+  test-silver:
+    name: "Tests: Silver (bypassed)"
+    needs: detect
+    if: false
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt', 'setup.py') }}
+
+      - name: Set up Python venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Add venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Run silver tests
+        run: python3 -m pytest tests/unit/test_silver.py -m unit -v
+
+  test-gold:
+    name: "Tests: Gold (bypassed)"
+    needs: detect
+    if: false
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt', 'setup.py') }}
+
+      - name: Set up Python venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Add venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Run gold tests
+        run: python3 -m pytest tests/unit/test_gold.py -m unit -v
+
+  test-training:
+    name: "Tests: Training & Validation (bypassed)"
+    needs: detect
+    if: false
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('requirements.txt', 'setup.py') }}
+
+      - name: Set up Python venv
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Add venv to PATH
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: Run training & validation tests
+        run: python3 -m pytest tests/unit/test_train.py tests/unit/test_validate.py -m unit -v

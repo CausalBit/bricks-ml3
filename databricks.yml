@@ -1,0 +1,89 @@
+bundle:
+  name: bricks-ml3
+
+artifacts:
+  bricks_ml3_wheel:
+    type: whl
+    path: .
+
+variables:
+  catalog:
+    description: Unity Catalog catalog name
+  warehouse_id:
+    description: SQL warehouse ID for queries
+    default: ""
+  sample_fraction:
+    description: Fraction of users for training (0.2 dev, 1.0 prod)
+  service_principal_name:
+    description: Service principal for CI/CD grants
+    default: mlops_sp
+  schedule_pause_status:
+    description: "PAUSED or UNPAUSED — controls whether daily_scoring runs on schedule"
+    default: PAUSED
+  retraining_pause_status:
+    description: "PAUSED or UNPAUSED — controls whether weekly_retraining runs on schedule"
+    default: PAUSED
+  hyperparams_profile:
+    description: "Hyperparams profile: dev or prod"
+    default: "dev"
+  src_catalog:
+    description: "Source catalog for model promotion (staging catalog)"
+    default: dsml_staging
+
+  # --- Cluster sizing ---
+  # ETL cluster: distributed Spark tasks (feature engineering, silver ETL, simulate_new_data)
+  etl_node_type_id:
+    description: "VM type for ETL/Spark worker nodes"
+    default: Standard_D8ds_v5
+  etl_num_workers:
+    description: "Number of workers for ETL tasks (0 = single node)"
+    default: "0"
+  # Training cluster: single-node tasks (toPandas + sklearn model.fit, validation, batch scoring)
+  # Uses a memory-optimized driver because toPandas() collects the full dataset to driver RAM.
+  training_node_type_id:
+    description: "VM type for training/scoring driver (memory-optimized at full scale)"
+    default: Standard_D8ds_v5
+  driver_memory:
+    description: "Spark driver memory for training tasks"
+    default: "16g"
+
+targets:
+  pre-dev:
+    variables:
+      catalog: dsml_dev
+      sample_fraction: "0.2"
+      schedule_pause_status: PAUSED
+
+  dev:
+    default: true
+    variables:
+      catalog: dsml_dev
+      sample_fraction: "0.2"
+      schedule_pause_status: PAUSED
+      # Dev: 20% data fits on a single node, no workers needed
+      etl_num_workers: "0"
+
+  staging:
+    variables:
+      catalog: dsml_staging
+      sample_fraction: "1.0"
+      hyperparams_profile: "prod"
+      schedule_pause_status: UNPAUSED
+      retraining_pause_status: UNPAUSED
+      # Staging: 100% data — ETL needs workers, training needs memory-optimized driver
+      etl_num_workers: "2"
+      training_node_type_id: Standard_E8ds_v5
+      driver_memory: "44g"
+
+  prod:
+    variables:
+      catalog: dsml_prod
+      sample_fraction: "1.0"
+      hyperparams_profile: "prod"
+      schedule_pause_status: UNPAUSED
+      retraining_pause_status: PAUSED
+      # Prod: no training — ETL workers for daily_scoring, standard driver is fine
+      etl_num_workers: "2"
+
+include:
+  - resources/jobs.yml

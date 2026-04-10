@@ -1,0 +1,108 @@
+name: _Deploy Bundle
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+        description: "DABs target (dev, staging, prod)"
+      run_job:
+        required: false
+        type: string
+        default: ""
+        description: "Job to run after deploy. Empty = auto-detect from changed files. Use 'none' to skip."
+      base_sha:
+        required: false
+        type: string
+        default: ""
+        description: "Base SHA for change detection (empty = HEAD~1)"
+      ref:
+        required: false
+        type: string
+        default: ""
+        description: "Git ref to checkout (empty = default github.ref)"
+
+permissions:
+  contents: read
+
+env:
+  DATABRICKS_HOST: https://YOUR_WORKSPACE.azuredatabricks.net/
+  DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+  DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+  PYTHON: /opt/homebrew/Caskroom/miniforge/base/bin/python3
+
+jobs:
+  deploy:
+    name: "Deploy to ${{ inputs.target }}"
+    runs-on: self-hosted
+    environment: ${{ inputs.target }}
+    outputs:
+      job_run: ${{ steps.resolve-job.outputs.job }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Add Homebrew to PATH
+        run: echo "/opt/homebrew/bin" >> $GITHUB_PATH
+
+      - name: Set up Python venv and install dependencies
+        run: |
+          $PYTHON -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> $GITHUB_PATH
+
+      - name: "Pre-deploy: ensure catalog, schemas, volumes, and permissions"
+        run: python scripts/setup_catalog.py --target ${{ inputs.target }}
+
+      - name: "Deploy bundle to ${{ inputs.target }}"
+        run: databricks bundle deploy -t ${{ inputs.target }}
+
+      # --- Resolve which job to run -----------------------------------------
+      - name: Resolve post-deploy job
+        id: resolve-job
+        run: |
+          EXPLICIT_JOB="${{ inputs.run_job }}"
+          if [ "$EXPLICIT_JOB" = "none" ]; then
+            echo "job=" >> "$GITHUB_OUTPUT"
+            echo "Post-deploy job: skipped (explicit 'none')"
+          elif [ -n "$EXPLICIT_JOB" ]; then
+            echo "job=$EXPLICIT_JOB" >> "$GITHUB_OUTPUT"
+            echo "Post-deploy job: $EXPLICIT_JOB (explicit)"
+          else
+            BASE="${{ inputs.base_sha }}"
+            [ -z "$BASE" ] && BASE="HEAD~1"
+            DETECT_OUTPUT=$(bash scripts/detect_changes.sh "$BASE" HEAD)
+            echo "$DETECT_OUTPUT"
+            DETECTED_JOB=$(echo "$DETECT_OUTPUT" | grep '^job=' | cut -d= -f2)
+            echo "job=$DETECTED_JOB" >> "$GITHUB_OUTPUT"
+            echo "Post-deploy job: ${DETECTED_JOB:-none (deploy only)}"
+          fi
+
+      # --- Readiness guard --------------------------------------------------
+      - name: "Check environment readiness"
+        if: >-
+          steps.resolve-job.outputs.job != '' &&
+          steps.resolve-job.outputs.job != 'bootstrap' &&
+          steps.resolve-job.outputs.job != 'initial_training'
+        run: python scripts/check_readiness.py --target ${{ inputs.target }}
+
+      - name: "Run job: ${{ steps.resolve-job.outputs.job }}"
+        if: steps.resolve-job.outputs.job != ''
+        run: databricks bundle run -t ${{ inputs.target }} ${{ steps.resolve-job.outputs.job }}
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target:** ${{ inputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job run:** ${{ steps.resolve-job.outputs.job || 'none' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
